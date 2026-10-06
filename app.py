@@ -63,47 +63,35 @@ DIRECTOR_SYSTEM="""Você é ADC Director. Crie storyboard vertical 9:16 com cena
 CRITIC_SYSTEM="""Você é ADC Critic independente. Avalie hook, retenção, narrativa, clareza e credibilidade. Reprove afirmações sem sustentação e abertura fraca."""
 WATCHER_SYSTEM="""Você é ADC Watcher independente. Procure falhas críticas de narrativa, fatos, voz e coerência visual. Falha crítica deve bloquear."""
 
-def ask_structured(system_instruction,prompt,schema):
+async def run_agent(sys,prompt,schema):
     if not API_KEY:
         raise RuntimeError("GEMINI_API_KEY ausente")
     last=None
     for model_name in dict.fromkeys(FALLBACK_MODELS):
-        for attempt in range(2):
-            try:
-                client=genai.Client(
-                    api_key=API_KEY,
-                    http_options=types.HttpOptions(api_version="v1",timeout=12000)
-                )
-                r=client.models.generate_content(
+        try:
+            client=genai.Client(
+                api_key=API_KEY,
+                http_options=types.HttpOptions(api_version="v1")
+            )
+            r=await asyncio.wait_for(
+                client.aio.models.generate_content(
                     model=model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
+                        system_instruction=sys,
                         response_mime_type="application/json",
                         response_schema=schema,
                         temperature=0.5
                     )
-                )
-                return r.parsed if r.parsed is not None else schema.model_validate_json(r.text)
-            except Exception as e:
-                last=e
-                msg=str(e)
-                retryable=any(x in msg for x in ["503","UNAVAILABLE","429","RESOURCE_EXHAUSTED","timeout","Timeout"])
-                if retryable and attempt==0:
-                    import time
-                    time.sleep(1.0)
-                    continue
-                break
-    raise RuntimeError(f"Gemini indisponível após retry/fallback: {last}")
-
-async def run_agent(sys,prompt,schema):
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(ask_structured,sys,prompt,schema),
-            timeout=35
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError("Gemini excedeu 35 segundos sem responder")
+                ),
+                timeout=25
+            )
+            return r.parsed if r.parsed is not None else schema.model_validate_json(r.text)
+        except asyncio.TimeoutError:
+            last=RuntimeError(f"{model_name} excedeu 25 segundos")
+        except Exception as exc:
+            last=exc
+    raise RuntimeError(f"Gemini indisponível após fallbacks: {last}")
 
 def gate_passes(c):
     return c.average>=85 and c.hook>=90 and c.credibility>=95 and not c.critical_issues
