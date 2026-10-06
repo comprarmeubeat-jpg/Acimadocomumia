@@ -15,7 +15,7 @@ app = FastAPI(title="Acima do Comum AI Studio")
 PASSWORD = os.getenv("ADC_PANEL_PASSWORD","").strip()
 API_KEY = os.getenv("GEMINI_API_KEY","").strip()
 MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-2.5-flash-lite")
-FALLBACK_MODELS = [MODEL]
+FALLBACK_MODELS = [MODEL,"gemini-3.5-flash-lite","gemini-3.7-flash"]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
@@ -63,26 +63,46 @@ CRITIC_SYSTEM="""Você é ADC Critic independente. Avalie hook, retenção, narr
 WATCHER_SYSTEM="""Você é ADC Watcher independente. Procure falhas críticas de narrativa, fatos, voz e coerência visual. Falha crítica deve bloquear."""
 
 def ask_structured(system_instruction,prompt,schema):
-    if not API_KEY: raise RuntimeError("GEMINI_API_KEY ausente")
+    if not API_KEY:
+        raise RuntimeError("GEMINI_API_KEY ausente")
     last=None
     for model_name in dict.fromkeys(FALLBACK_MODELS):
-        try:
-            client=genai.Client(api_key=API_KEY,http_options=types.HttpOptions(api_version="v1",timeout=15000))
-            r=client.models.generate_content(model=model_name,contents=prompt,config=types.GenerateContentConfig(
-                system_instruction=system_instruction,response_mime_type="application/json",response_schema=schema,temperature=0.5))
-            return r.parsed if r.parsed is not None else schema.model_validate_json(r.text)
-        except Exception as e:
-            last=e
-    raise RuntimeError(f"Gemini indisponível: {last}")
+        for attempt in range(2):
+            try:
+                client=genai.Client(
+                    api_key=API_KEY,
+                    http_options=types.HttpOptions(api_version="v1",timeout=12000)
+                )
+                r=client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                        temperature=0.5
+                    )
+                )
+                return r.parsed if r.parsed is not None else schema.model_validate_json(r.text)
+            except Exception as e:
+                last=e
+                msg=str(e)
+                retryable=any(x in msg for x in ["503","UNAVAILABLE","429","RESOURCE_EXHAUSTED","timeout","Timeout"])
+                if retryable and attempt==0:
+                    import time
+                    time.sleep(1.0)
+                    continue
+                break
+    raise RuntimeError(f"Gemini indisponível após retry/fallback: {last}")
 
 async def run_agent(sys,prompt,schema):
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(ask_structured,sys,prompt,schema),
-            timeout=22
+            timeout=35
         )
     except asyncio.TimeoutError:
-        raise RuntimeError("Gemini excedeu 22 segundos sem responder")
+        raise RuntimeError("Gemini excedeu 35 segundos sem responder")
 
 def gate_passes(c):
     return c.average>=85 and c.hook>=90 and c.credibility>=95 and not c.critical_issues
