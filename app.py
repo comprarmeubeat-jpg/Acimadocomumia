@@ -1,5 +1,6 @@
 import os, hmac, hashlib, html, json, asyncio, uuid, tempfile, shutil, subprocess, re
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import httpx
 import edge_tts
@@ -123,9 +124,9 @@ def safe_text(s,n=140):
 
 def commons_image(query,out_path):
     api="https://commons.wikimedia.org/w/api.php"
-    params={"action":"query","generator":"search","gsrsearch":query,"gsrnamespace":6,"gsrlimit":8,
+    params={"action":"query","generator":"search","gsrsearch":query,"gsrnamespace":6,"gsrlimit":5,
             "prop":"imageinfo","iiprop":"url|mime|extmetadata","format":"json","origin":"*"}
-    r=requests.get(api,params=params,timeout=8,headers={"User-Agent":"ADCStudio/0.8"}); r.raise_for_status()
+    r=requests.get(api,params=params,timeout=(3,5),headers={"User-Agent":"ADCStudio/1.0"}); r.raise_for_status()
     pages=(r.json().get("query") or {}).get("pages") or {}
     for p in pages.values():
         ii=(p.get("imageinfo") or [{}])[0]; mime=ii.get("mime","")
@@ -134,7 +135,7 @@ def commons_image(query,out_path):
         if not any(x in lic.lower() for x in ["cc","public domain","pd"]): continue
         url=ii.get("url")
         if not url: continue
-        raw=requests.get(url,timeout=12,headers={"User-Agent":"ADCStudio/0.8"}); raw.raise_for_status()
+        raw=requests.get(url,timeout=(3,6),headers={"User-Agent":"ADCStudio/1.0"}); raw.raise_for_status()
         Path(out_path).write_bytes(raw.content)
         return {"title":p.get("title",""),"license":lic,"source":ii.get("descriptionurl",url)}
     return None
@@ -206,17 +207,27 @@ def render_free_media(result,workdir):
     print("ADC_MEDIA_TTS_DONE", flush=True)
     duration=max(float(MP3(audio).info.length),5.0)
     shots=result["storyboard"].shots or [Shot(index=1,narration_excerpt="",visual=result["script"].title,camera_motion="",duration_seconds=duration)]
-    shots=shots[:10]
-    sources=[]; imgs=[]
+    shots=shots[:8]
     print("ADC_MEDIA_IMAGES_START", flush=True)
-    for i,shot in enumerate(shots):
+    items=[None]*len(shots)
+    def fetch_visual(i,shot):
         img=str(wd/f"img_{i:02}.jpg")
-        q=safe_text(shot.visual,100)
-        try: info=commons_image(q,img)
-        except Exception: info=None
+        q=safe_text(shot.visual,90)
+        try:
+            info=commons_image(q,img)
+        except Exception:
+            info=None
         if not info:
-            fallback_image(shot.visual,img); info={"title":"ADC fallback visual","license":"generated fallback","source":""}
-        imgs.append(img); sources.append(info)
+            fallback_image(shot.visual,img)
+            info={"title":"ADC fallback visual","license":"generated fallback","source":""}
+        return i,img,info
+    with ThreadPoolExecutor(max_workers=min(6,max(1,len(shots)))) as ex:
+        futures=[ex.submit(fetch_visual,i,shot) for i,shot in enumerate(shots)]
+        for fut in as_completed(futures):
+            i,img,info=fut.result()
+            items[i]=(img,info)
+    imgs=[x[0] for x in items]
+    sources=[x[1] for x in items]
     print("ADC_MEDIA_IMAGES_DONE", flush=True)
     ff=imageio_ffmpeg.get_ffmpeg_exe()
     print("ADC_MEDIA_FFMPEG_START", flush=True)
