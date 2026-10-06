@@ -17,7 +17,9 @@ API_KEY = os.getenv("GEMINI_API_KEY","").strip()
 MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-2.5-flash-lite")
 FALLBACK_MODELS = [MODEL,"gemini-2.5-flash-lite","gemini-2.5-flash"]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
+SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
+SELFTESTS = {}
 
 def auth_token():
     return hashlib.sha256(("adc:"+PASSWORD).encode()).hexdigest()
@@ -308,6 +310,68 @@ async def media(request:Request,jid:str):
     j=JOBS.get(jid); path=j.get("media") if j else None
     if not path or not os.path.exists(path): return HTMLResponse("Arquivo não disponível",404)
     return FileResponse(path,media_type="video/mp4",filename="acima_do_comum.mp4")
+
+
+async def selftest_runner(tid):
+    report={"brain":{},"media":{}}
+    try:
+        brain=await run_pipeline("Crie um vídeo vertical curto de 20 segundos sobre a invenção da lâmpada, sem inventar fatos e com narrativa natural.")
+        report["brain"]={
+            "ok":True,
+            "title":brain["script"].title,
+            "blocked":brain["blocked"],
+            "score":brain["critic"].average
+        }
+    except Exception as e:
+        report["brain"]={"ok":False,"error":str(e)}
+    try:
+        synthetic={
+            "script":ScriptDraft(
+                title="Teste técnico ADC",
+                hook="Um teste curto para validar voz, imagem, edição e Watcher.",
+                script="Este é um teste técnico do Acima do Comum. A narração, as imagens, as legendas e o vídeo final estão sendo validados automaticamente.",
+                estimated_seconds=15,
+                scenes=["microfone de estúdio","edição de vídeo","legendas em vídeo"],
+                factual_claims=[]
+            ),
+            "storyboard":Storyboard(
+                format="9:16",
+                visual_style="documental",
+                shots=[
+                    Shot(index=1,narration_excerpt="Este é um teste técnico",visual="microphone recording studio",camera_motion="slow zoom",duration_seconds=5),
+                    Shot(index=2,narration_excerpt="narração, imagens",visual="video editing workstation",camera_motion="slow pan",duration_seconds=5),
+                    Shot(index=3,narration_excerpt="validados automaticamente",visual="subtitles on video screen",camera_motion="static",duration_seconds=5),
+                ]
+            )
+        }
+        wd=tempfile.mkdtemp(prefix="adc_selftest_")
+        out,sources,duration,qa=await asyncio.to_thread(render_free_media,synthetic,wd)
+        report["media"]={
+            "ok":bool(qa.get("ok")),
+            "duration":duration,
+            "qa":qa,
+            "size":os.path.getsize(out) if os.path.exists(out) else 0,
+            "sources":sources
+        }
+    except Exception as e:
+        report["media"]={"ok":False,"error":str(e)}
+    report["ok"]=bool(report["brain"].get("ok")) and bool(report["media"].get("ok"))
+    SELFTESTS[tid]={"status":"complete","report":report}
+
+@app.get("/_selftest/start/{token}")
+async def selftest_start(token:str):
+    if not SELFTEST_TOKEN or not hmac.compare_digest(token,SELFTEST_TOKEN):
+        return {"ok":False,"error":"forbidden"}
+    tid=uuid.uuid4().hex[:10]
+    SELFTESTS[tid]={"status":"running"}
+    asyncio.create_task(selftest_runner(tid))
+    return {"ok":True,"id":tid}
+
+@app.get("/_selftest/status/{token}/{tid}")
+async def selftest_status(token:str,tid:str):
+    if not SELFTEST_TOKEN or not hmac.compare_digest(token,SELFTEST_TOKEN):
+        return {"ok":False,"error":"forbidden"}
+    return SELFTESTS.get(tid,{"status":"missing"})
 
 @app.get("/health")
 async def health():
