@@ -359,6 +359,12 @@ async def selftest_runner(tid):
     SELFTESTS[tid]={"status":"complete","report":report}
     print("ADC_SELFTEST_RESULT="+json.dumps(report,ensure_ascii=False), flush=True)
 
+@app.on_event("startup")
+async def adc_startup_selftest():
+    if SELFTEST_AUTO:
+        SELFTESTS["boot"]={"status":"running"}
+        asyncio.create_task(selftest_runner("boot"))
+
 @app.get("/_selftest/start/{token}")
 async def selftest_start(token:str):
     if not SELFTEST_TOKEN or not hmac.compare_digest(token,SELFTEST_TOKEN):
