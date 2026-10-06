@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 app = FastAPI(title="Acima do Comum AI Studio")
 PASSWORD = os.getenv("ADC_PANEL_PASSWORD","").strip()
 API_KEY = os.getenv("GEMINI_API_KEY","").strip()
-MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-2.5-flash-lite")
-FALLBACK_MODELS = [MODEL,"gemini-3.5-flash-lite","gemini-3.7-flash"]
+MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-3.5-flash-lite")
+FALLBACK_MODELS = [MODEL,"gemini-3.7-flash","gemini-3.5-flash"]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
