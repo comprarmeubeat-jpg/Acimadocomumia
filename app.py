@@ -18,7 +18,6 @@ MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-3.5-flash-lite")
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
-SMOKE_TEST_ON_START = os.getenv("ADC_SMOKE_TEST_ON_START","").lower() == "true"
 SELFTESTS = {}
 SELFTEST_AUTO = os.getenv("ADC_SELFTEST_AUTO","0") == "1"
 
@@ -108,13 +107,51 @@ def gate_passes(c):
 
 async def run_pipeline(brief):
     producer=RADAR_SYSTEM+"\n"+STORY_SYSTEM+"\n"+VOICE_SYSTEM+"\n"+DIRECTOR_SYSTEM
-    draft=await run_agent(producer,"Execute Radar, Story, Voice e Director. BRIEF:\n"+brief,DraftPackage)
-    review=await run_agent(CRITIC_SYSTEM+"\n"+WATCHER_SYSTEM,
-        "Audite do zero este pacote e tente encontrar falhas reais:\n"+draft.model_dump_json(),ReviewPackage)
+    qa_system=CRITIC_SYSTEM+"\n"+WATCHER_SYSTEM
+
+    draft=await run_agent(
+        producer,
+        "Execute Radar, Story, Voice e Director. BRIEF:\n"+brief,
+        DraftPackage
+    )
+    review=await run_agent(
+        qa_system,
+        "Audite do zero este pacote e tente encontrar falhas reais:\n"+draft.model_dump_json(),
+        ReviewPackage
+    )
+
+    revisions=0
     c,w=review.critic,review.watcher
     blocked=(not gate_passes(c) or bool(w.critical_failures) or w.narrative_score<90 or w.factual_risk_score>15)
-    return {"research":draft.research,"script":draft.script,"critic":c,"revision_count":0,
-            "blocked":blocked,"voice":draft.voice,"storyboard":draft.storyboard,"watcher":w}
+
+    if blocked:
+        revisions=1
+        draft=await run_agent(
+            producer,
+            "Reescreva e reconstrua TODO o pacote corrigindo rigorosamente a auditoria. "
+            "Não baixe o padrão para ser aprovado.\nBRIEF:\n"+brief+
+            "\nPACOTE ANTERIOR:\n"+draft.model_dump_json()+
+            "\nAUDITORIA:\n"+review.model_dump_json(),
+            DraftPackage
+        )
+        review=await run_agent(
+            qa_system,
+            "Faça uma NOVA auditoria independente desta versão revisada:\n"+draft.model_dump_json(),
+            ReviewPackage
+        )
+        c,w=review.critic,review.watcher
+        blocked=(not gate_passes(c) or bool(w.critical_failures) or w.narrative_score<90 or w.factual_risk_score>15)
+
+    return {
+        "research":draft.research,
+        "script":draft.script,
+        "critic":c,
+        "revision_count":revisions,
+        "blocked":blocked,
+        "voice":draft.voice,
+        "storyboard":draft.storyboard,
+        "watcher":w
+    }
 
 def safe_text(s,n=140):
     return re.sub(r"\s+"," ",s or "").strip()[:n]
@@ -196,16 +233,13 @@ def render_free_media(result,workdir):
     wd=Path(workdir); wd.mkdir(parents=True,exist_ok=True)
     script=result["script"].script
     audio=str(wd/"voice.mp3")
-    print("ADC_MEDIA_TTS_START", flush=True)
     asyncio.run(asyncio.wait_for(tts_to_file(script,audio), timeout=25))
-    print("ADC_MEDIA_TTS_DONE", flush=True)
     duration=max(float(MP3(audio).info.length),5.0)
 
     shots=result["storyboard"].shots or [
         Shot(index=1,narration_excerpt="",visual=result["script"].title,camera_motion="",duration_seconds=duration)
     ]
     shots=shots[:5]
-    print("ADC_MEDIA_IMAGES_START", flush=True)
     items=[None]*len(shots)
 
     def fetch_visual(i,shot):
@@ -228,7 +262,6 @@ def render_free_media(result,workdir):
 
     imgs=[x[0] for x in items]
     sources=[x[1] for x in items]
-    print("ADC_MEDIA_IMAGES_DONE", flush=True)
 
     segdur=duration/max(len(imgs),1)
     concat=wd/"concat.txt"
@@ -246,7 +279,6 @@ def render_free_media(result,workdir):
     base_filter="scale=540:960:force_original_aspect_ratio=increase,crop=540:960,fps=20,format=yuv420p"
     subtitle_filter=base_filter+",subtitles=captions.srt:force_style='FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=90'"
 
-    print("ADC_MEDIA_FFMPEG_START", flush=True)
     cmd=[ff,"-y","-f","concat","-safe","0","-i","concat.txt","-i","voice.mp3",
          "-vf",subtitle_filter,"-c:v","libx264","-preset","ultrafast","-crf","26","-threads","1",
          "-c:a","aac","-b:a","128k","-shortest","adc_final.mp4"]
@@ -257,28 +289,42 @@ def render_free_media(result,workdir):
                   "-vf",base_filter,"-c:v","libx264","-preset","ultrafast","-crf","25",
                   "-c:a","aac","-b:a","128k","-shortest","adc_final.mp4"]
         subprocess.run(fallback,cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
-    print("ADC_MEDIA_FFMPEG_DONE", flush=True)
 
-    print("ADC_MEDIA_QA_START", flush=True)
     qa=media_qa(out,duration)
-    print("ADC_MEDIA_QA_DONE", flush=True)
     return out,sources,duration,qa
 
 async def planning_task(job_id,brief):
     try:
-        JOBS[job_id]["result"]=await run_pipeline(brief)
-        JOBS[job_id]["status"]="blocked" if JOBS[job_id]["result"]["blocked"] else "ready"
+        result=await run_pipeline(brief)
+        JOBS[job_id]["result"]=result
+        if result["blocked"]:
+            JOBS[job_id]["status"]="blocked"
+        else:
+            JOBS[job_id]["status"]="rendering"
+            await render_task(job_id)
     except Exception as e:
-        JOBS[job_id]["status"]="failed"; JOBS[job_id]["error"]=str(e)
+        JOBS[job_id]["status"]="failed"
+        JOBS[job_id]["error"]=str(e)
 
 async def render_task(job_id):
     try:
         JOBS[job_id]["status"]="rendering"
         wd=tempfile.mkdtemp(prefix="adc_")
-        out,sources,duration=await asyncio.to_thread(render_free_media,JOBS[job_id]["result"],wd)
-        JOBS[job_id].update({"status":"complete","media":out,"sources":sources,"duration":duration,"workdir":wd})
+        out,sources,duration,qa=await asyncio.to_thread(
+            render_free_media,JOBS[job_id]["result"],wd
+        )
+        status="complete" if qa.get("ok") else "media_blocked"
+        JOBS[job_id].update({
+            "status":status,
+            "media":out,
+            "sources":sources,
+            "duration":duration,
+            "qa":qa,
+            "workdir":wd
+        })
     except Exception as e:
-        JOBS[job_id]["status"]="render_failed"; JOBS[job_id]["error"]=str(e)
+        JOBS[job_id]["status"]="render_failed"
+        JOBS[job_id]["error"]=str(e)
 
 CSS="""body{font-family:Arial,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:18px}.wrap{max-width:900px;margin:auto}
 .card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:20px;margin:16px 0}
@@ -299,7 +345,7 @@ async def home(request:Request):
     if not is_auth(request):
         return page('<div class="card"><h1>🔒 Acima do Comum</h1><form method="post" action="/login"><input type="password" name="password" placeholder="Senha" required><br><br><button>Entrar</button></form></div>')
     status='<span class="ok">Gemini configurado</span>' if API_KEY else '<span class="bad">Gemini ausente</span>'
-    return page(f'<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1><p class="muted">V1.0 Free • Brain + QA + TTS + Commons + MP4 + Media Watcher</p><p>{status}</p></div>'
+    return page(f'<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1><p class="muted">V1.0 Free • Automático • Brain → QA → Voz → Imagens → MP4 → Watcher</p><p>{status}</p></div>'
                 '<div class="card"><form method="post" action="/produce"><label>O que vamos produzir?</label><br><br>'
                 '<textarea name="brief" rows="7" required placeholder="Ex.: vídeo vertical de 60 segundos sobre um mistério histórico brasileiro."></textarea><br><br>'
                 '<button>Iniciar produção</button></form></div>')
@@ -324,7 +370,7 @@ async def job(request:Request,jid:str):
     if not j: return page('<div class="card"><h2>Projeto não encontrado</h2></div>')
     st=j["status"]
     if st in ("planning","rendering"):
-        label="Planejando e auditando..." if st=="planning" else "Gerando voz, buscando imagens e montando MP4..."
+        label="Planejando, auditando e corrigindo..." if st=="planning" else "Gerando voz, imagens, legendas e MP4..."
         return page(f'<div class="card"><h2>{label}</h2><p class="muted">Pode deixar esta tela aberta; ela atualiza sozinha.</p></div>',3)
     if st in ("failed","render_failed","media_blocked"):
         msg=j.get("error","")
@@ -335,12 +381,10 @@ async def job(request:Request,jid:str):
         ("Gancho",c.hook),("Retenção",c.retention),("Narrativa",c.narrative),("Clareza",c.clarity),("Credibilidade",c.credibility),("ADC Score",c.average)])
     final='<p class="bad"><b>⛔ BLOQUEADO PELO QA</b></p>' if r["blocked"] else '<p class="ok"><b>✅ PRÉ-PRODUÇÃO APROVADA</b></p>'
     media=""
-    if st=="ready":
-        media=f'<form method="post" action="/render/{jid}"><button>Gerar vídeo grátis (MP4)</button></form>'
-    elif st=="complete":
+    if st=="complete":
         media=f'<a class="btn" href="/media/{jid}">Abrir / baixar MP4</a><p class="muted">Duração: {j.get("duration",0):.1f}s</p>'
         credits="".join(f'<li>{html.escape(x.get("title",""))} — {html.escape(x.get("license",""))}</li>' for x in j.get("sources",[]))
-        media+=f'<details><summary>Créditos das imagens</summary><ul>{credits}</ul></details>'
+        media+=f'<p class="muted">No plano gratuito, salve o MP4 após concluir; o Render pode remover arquivos temporários ao reiniciar.</p><details><summary>Créditos das imagens</summary><ul>{credits}</ul></details>'
     def dump(x): return html.escape(json.dumps(x.model_dump(),ensure_ascii=False,indent=2)) if x else "Bloqueado"
     return page(f'<div class="card"><a href="/">← Novo projeto</a><h1>{html.escape(s.title)}</h1><h3>Gancho</h3><p>{html.escape(s.hook)}</p>'
                 f'<div class="grid">{metrics}</div>{final}{media}</div>'
@@ -367,41 +411,4 @@ async def media(request:Request,jid:str):
 
 @app.get("/health")
 async def health():
-    return {"ok":True,"version":"1.0-free","gemini":bool(API_KEY),"free_media":True,"media_watcher":True}
-
-
-async def _adc_smoke_test():
-    print("ADC_SMOKE_START", flush=True)
-    wd=None
-    try:
-        brief=("Crie um vídeo vertical educativo de aproximadamente 30 segundos explicando "
-               "por que o céu muda de cor no pôr do sol. Use linguagem simples, fatos seguros, "
-               "abertura forte e nenhuma afirmação sensacionalista.")
-        result=await run_pipeline(brief)
-        print("ADC_SMOKE_AI_DONE", flush=True)
-        wd=tempfile.mkdtemp(prefix="adc_smoke_")
-        print("ADC_SMOKE_MEDIA_START", flush=True)
-        out,sources,duration,qa=await asyncio.to_thread(render_free_media,result,wd)
-        print("ADC_SMOKE_MEDIA_DONE", flush=True)
-        summary={
-            "pipeline_blocked": bool(result.get("blocked")),
-            "critic_score": result["critic"].average,
-            "watcher_critical": result["watcher"].critical_failures,
-            "mp4_exists": os.path.exists(out),
-            "mp4_size": os.path.getsize(out) if os.path.exists(out) else 0,
-            "duration": duration,
-            "image_count": len(sources),
-            "media_qa": qa,
-        }
-        print("ADC_SMOKE_RESULT "+json.dumps(summary,ensure_ascii=False), flush=True)
-    except Exception as e:
-        print("ADC_SMOKE_ERROR "+repr(e), flush=True)
-    finally:
-        if wd:
-            shutil.rmtree(wd,ignore_errors=True)
-        print("ADC_SMOKE_END", flush=True)
-
-@app.on_event("startup")
-async def _run_smoke_test_once():
-    if SMOKE_TEST_ON_START:
-        asyncio.create_task(_adc_smoke_test())
+    return {"ok":True,"version":"1.0-free-final","gemini":bool(API_KEY),"free_media":True,"media_watcher":True}
