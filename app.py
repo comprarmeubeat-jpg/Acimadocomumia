@@ -273,7 +273,7 @@ async def home(request:Request):
     if not is_auth(request):
         return page('<div class="card"><h1>🔒 Acima do Comum</h1><form method="post" action="/login"><input type="password" name="password" placeholder="Senha" required><br><br><button>Entrar</button></form></div>')
     status='<span class="ok">Gemini configurado</span>' if API_KEY else '<span class="bad">Gemini ausente</span>'
-    return page(f'<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1><p class="muted">V0.9 • Free Media • Brain + QA + TTS + Commons + MP4 + Media Watcher</p><p>{status}</p></div>'
+    return page(f'<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1><p class="muted">V1.0 Free • Brain + QA + TTS + Commons + MP4 + Media Watcher</p><p>{status}</p></div>'
                 '<div class="card"><form method="post" action="/produce"><label>O que vamos produzir?</label><br><br>'
                 '<textarea name="brief" rows="7" required placeholder="Ex.: vídeo vertical de 60 segundos sobre um mistério histórico brasileiro."></textarea><br><br>'
                 '<button>Iniciar produção</button></form></div>')
@@ -339,74 +339,6 @@ async def media(request:Request,jid:str):
     return FileResponse(path,media_type="video/mp4",filename="acima_do_comum.mp4")
 
 
-async def selftest_runner(tid):
-    report={"brain":{},"media":{}}
-    try:
-        brain=await run_pipeline("Crie um vídeo vertical curto de 20 segundos sobre a invenção da lâmpada, sem inventar fatos e com narrativa natural.")
-        report["brain"]={
-            "ok":True,
-            "title":brain["script"].title,
-            "blocked":brain["blocked"],
-            "score":brain["critic"].average
-        }
-    except Exception as e:
-        report["brain"]={"ok":False,"error":str(e)}
-    try:
-        synthetic={
-            "script":ScriptDraft(
-                title="Teste técnico ADC",
-                hook="Um teste curto para validar voz, imagem, edição e Watcher.",
-                script="Este é um teste técnico do Acima do Comum. A narração, as imagens, as legendas e o vídeo final estão sendo validados automaticamente.",
-                estimated_seconds=15,
-                scenes=["microfone de estúdio","edição de vídeo","legendas em vídeo"],
-                factual_claims=[]
-            ),
-            "storyboard":Storyboard(
-                format="9:16",
-                visual_style="documental",
-                shots=[
-                    Shot(index=1,narration_excerpt="Este é um teste técnico",visual="microphone recording studio",camera_motion="slow zoom",duration_seconds=5),
-                    Shot(index=2,narration_excerpt="narração, imagens",visual="video editing workstation",camera_motion="slow pan",duration_seconds=5),
-                    Shot(index=3,narration_excerpt="validados automaticamente",visual="subtitles on video screen",camera_motion="static",duration_seconds=5),
-                ]
-            )
-        }
-        wd=tempfile.mkdtemp(prefix="adc_selftest_")
-        out,sources,duration,qa=await asyncio.to_thread(render_free_media,synthetic,wd)
-        report["media"]={
-            "ok":bool(qa.get("ok")),
-            "duration":duration,
-            "qa":qa,
-            "size":os.path.getsize(out) if os.path.exists(out) else 0,
-            "sources":sources
-        }
-    except Exception as e:
-        report["media"]={"ok":False,"error":str(e)}
-    report["ok"]=bool(report["brain"].get("ok")) and bool(report["media"].get("ok"))
-    SELFTESTS[tid]={"status":"complete","report":report}
-    print("ADC_SELFTEST_RESULT="+json.dumps(report,ensure_ascii=False), flush=True)
-
-@app.on_event("startup")
-async def adc_startup_selftest():
-    if SELFTEST_AUTO:
-        SELFTESTS["boot"]={"status":"running"}
-        asyncio.create_task(selftest_runner("boot"))
-
-@app.get("/_selftest/start/{token}")
-async def selftest_start(token:str):
-    if not SELFTEST_TOKEN or not hmac.compare_digest(token,SELFTEST_TOKEN):
-        return {"ok":False,"error":"forbidden"}
-    tid=uuid.uuid4().hex[:10]
-    SELFTESTS[tid]={"status":"running"}
-    asyncio.create_task(selftest_runner(tid))
-    return {"ok":True,"id":tid}
-
-@app.get("/_selftest/status/{token}/{tid}")
-async def selftest_status(token:str,tid:str):
-    if not SELFTEST_TOKEN or not hmac.compare_digest(token,SELFTEST_TOKEN):
-        return {"ok":False,"error":"forbidden"}
-    return SELFTESTS.get(tid,{"status":"missing"})
-
 @app.get("/health")
 async def health():
-    return {"ok":True,"version":"0.9","gemini":bool(API_KEY),"free_media":True,"media_watcher":True}
+    return {"ok":True,"version":"1.0-free","gemini":bool(API_KEY),"free_media":True,"media_watcher":True}
