@@ -1,9 +1,9 @@
 import asyncio
 import os
 import hmac
-import json
 import streamlit as st
-from agents import Agent, Runner
+from google import genai
+from google.genai import types
 from pydantic import BaseModel, Field
 
 st.set_page_config(page_title="Acima do Comum AI Studio", page_icon="🎬", layout="wide")
@@ -83,107 +83,100 @@ class WatcherReport(BaseModel):
     qa_checklist: list[str] = []
     corrections: list[str] = []
 
-model = os.getenv("ADC_MODEL", "gpt-5")
+MODEL = os.getenv("ADC_GEMINI_MODEL", "gemini-3.8-flash")
+API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-radar = Agent(
-    name="ADC Radar",
-    model=model,
-    instructions="""Você é o pesquisador-chefe do Acima do Comum.
-Transforme o brief em plano editorial verificável. Não invente dados.
-Separe o que precisa ser confirmado, quais fontes seriam ideais,
-riscos factuais, melhor ângulo e estrutura de retenção.""",
-    output_type=ResearchPlan,
-)
+def ask_structured(system_instruction: str, prompt: str, schema):
+    client = genai.Client(api_key=API_KEY)
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=schema,
+            temperature=0.6,
+        ),
+    )
+    if response.parsed is not None:
+        return response.parsed
+    return schema.model_validate_json(response.text)
 
-story = Agent(
-    name="ADC Story",
-    model=model,
-    instructions="""Você é ADC Story, roteirista do Acima do Comum.
+async def run_agent(system_instruction: str, prompt: str, schema):
+    return await asyncio.to_thread(ask_structured, system_instruction, prompt, schema)
+
+RADAR_SYSTEM = """Você é ADC Radar, pesquisador-chefe do Acima do Comum.
+Transforme o brief em plano editorial verificável. Nunca invente dados.
+Liste fatos que precisam ser confirmados, fontes ideais, riscos, ângulo e estrutura de retenção.
+Se não houver fonte disponível no contexto, trate como algo a verificar, nunca como fato confirmado."""
+
+STORY_SYSTEM = """Você é ADC Story, roteirista profissional do Acima do Comum.
 Escreva em português brasileiro natural, cinematográfico e de alta retenção.
-Nunca abra com enumeração burocrática, frases genéricas ou 'você sabia?' automático.
-O início precisa gerar tensão, contraste, surpresa ou curiosidade real.
-Cada bloco deve entregar informação nova. Não invente fatos.
-Adapte o texto para narração fluida, evitando construções que soem robóticas.""",
-    output_type=ScriptDraft,
-)
+Nunca comece com enumeração burocrática nem com 'você sabia?' automático.
+Abra com tensão, contraste, surpresa ou curiosidade real.
+Cada bloco deve acrescentar informação. Não invente fatos.
+Escreva para narração fluida e humana, evitando cadência de TTS."""
 
-critic = Agent(
-    name="ADC Critic",
-    model=model,
-    instructions="""Você é um crítico independente e não pode aprovar por gentileza.
-Avalie de 0 a 100 hook, retention, narrative, clarity e credibility.
-Reprove abertura fraca, repetição, clickbait enganoso, afirmação não sustentada,
-tom robótico, estrutura mecânica ou conclusão frouxa.
-Liste problemas críticos e instruções objetivas de revisão.""",
-    output_type=CriticScore,
-)
+CRITIC_SYSTEM = """Você é ADC Critic e deve ser rigoroso e independente.
+Avalie hook, retention, narrative, clarity e credibility de 0 a 100.
+Reprove abertura fraca, repetição, clickbait enganoso, afirmação sem sustentação,
+tom robótico, estrutura mecânica e conclusão frouxa.
+Nunca aumente nota só para liberar o fluxo."""
 
-voice = Agent(
-    name="ADC Voice Director",
-    model=model,
-    instructions="""Você dirige narração profissional para vídeos de segmento.
-Crie direção de voz natural e comum em documentários, curiosidades e histórias:
-ritmo variável, pausas orgânicas, ênfases discretas e pronúncia clara.
-Evite fala picotada, aceleração artificial, pausas em lugares errados
-e cadência de TTS robótico.""",
-    output_type=VoicePlan,
-)
+VOICE_SYSTEM = """Você é ADC Voice Director.
+Crie direção de voz natural, comum em documentários, curiosidades e narrativas profissionais.
+Use ritmo variável, pausas orgânicas, ênfases discretas e pronúncia clara.
+Evite fala picotada, pausas artificiais, excesso de dramaticidade e cadência robótica."""
 
-director = Agent(
-    name="ADC Director",
-    model=model,
-    instructions="""Você é diretor audiovisual do Acima do Comum.
-Converta roteiro em storyboard vertical profissional. Cada cena deve corresponder
-à narração, variar visualmente e evitar repetição. Prefira imagens factualmente
-compatíveis. Use cortes e movimentos com propósito, não efeitos aleatórios.""",
-    output_type=Storyboard,
-)
+DIRECTOR_SYSTEM = """Você é ADC Director.
+Converta o roteiro em storyboard vertical profissional.
+Cada cena deve acompanhar a narração, variar visualmente e evitar repetição.
+Use movimentos de câmera apenas quando fizerem sentido.
+Evite cenas genéricas que não correspondam ao texto."""
 
-watcher = Agent(
-    name="ADC Watcher",
-    model=model,
-    instructions="""Você é o auditor final independente.
-Analise roteiro, direção de voz e storyboard e tente encontrar falhas antes
-de qualquer renderização cara. Seja rigoroso com travamento potencial de áudio,
-frases difíceis de narrar, cenas repetidas, descompasso visual, fatos frágeis,
-ritmo ruim, silêncios acidentais e risco de geração artificial evidente.
-Qualquer falha crítica deve bloquear a liberação.""",
-    output_type=WatcherReport,
-)
+WATCHER_SYSTEM = """Você é ADC Watcher, auditor final independente.
+Tente encontrar falhas antes de qualquer renderização.
+Seja rigoroso com possíveis travamentos de áudio, frases difíceis de narrar,
+cenas repetidas, inconsistência visual, fatos frágeis, ritmo ruim, silêncios
+acidentais e aparência artificial excessiva. Falha crítica deve bloquear."""
 
 def gate_passes(score: CriticScore) -> bool:
     return score.average >= 85 and score.hook >= 90 and score.credibility >= 95 and not score.critical_issues
 
 async def run_pipeline(brief: str):
-    research = (await Runner.run(radar, f"BRIEF:\n{brief}")).final_output
+    research = await run_agent(RADAR_SYSTEM, f"BRIEF:\n{brief}", ResearchPlan)
 
-    draft = (await Runner.run(
-        story,
-        "BRIEF:\n" + brief + "\nPLANO DE PESQUISA:\n" + research.model_dump_json()
-    )).final_output
+    draft = await run_agent(
+        STORY_SYSTEM,
+        "BRIEF:\n" + brief + "\nPLANO DE PESQUISA:\n" + research.model_dump_json(),
+        ScriptDraft,
+    )
 
-    review = (await Runner.run(
-        critic,
-        "Avalie rigorosamente este roteiro:\n" + draft.model_dump_json()
-    )).final_output
+    review = await run_agent(
+        CRITIC_SYSTEM,
+        "Avalie rigorosamente este roteiro:\n" + draft.model_dump_json(),
+        CriticScore,
+    )
 
     revision_count = 0
     while not gate_passes(review) and revision_count < 2:
         revision_count += 1
-        draft = (await Runner.run(
-            story,
-            "Reescreva o roteiro corrigindo integralmente a crítica abaixo. "
-            "Não maquie nota; resolva os problemas de verdade.\n"
+        draft = await run_agent(
+            STORY_SYSTEM,
+            "Reescreva o roteiro corrigindo integralmente esta crítica. "
+            "Não maquie nota; resolva os problemas.\nCRÍTICA:\n"
             + review.model_dump_json()
             + "\nROTEIRO ATUAL:\n"
             + draft.model_dump_json()
             + "\nPLANO:\n"
-            + research.model_dump_json()
-        )).final_output
-        review = (await Runner.run(
-            critic,
-            "Reavalie do zero, sem considerar notas anteriores:\n" + draft.model_dump_json()
-        )).final_output
+            + research.model_dump_json(),
+            ScriptDraft,
+        )
+        review = await run_agent(
+            CRITIC_SYSTEM,
+            "Reavalie do zero, ignorando as notas anteriores:\n" + draft.model_dump_json(),
+            CriticScore,
+        )
 
     if not gate_passes(review):
         return {
@@ -197,28 +190,31 @@ async def run_pipeline(brief: str):
             "watcher": None,
         }
 
-    voice_plan = (await Runner.run(
-        voice,
-        "Crie direção de voz para este roteiro:\n" + draft.model_dump_json()
-    )).final_output
+    voice_plan = await run_agent(
+        VOICE_SYSTEM,
+        "Crie direção de voz para este roteiro:\n" + draft.model_dump_json(),
+        VoicePlan,
+    )
 
-    board = (await Runner.run(
-        director,
-        "Crie storyboard para este roteiro e direção de voz:\nROTEIRO:\n"
+    board = await run_agent(
+        DIRECTOR_SYSTEM,
+        "Crie o storyboard para:\nROTEIRO:\n"
         + draft.model_dump_json()
         + "\nVOZ:\n"
-        + voice_plan.model_dump_json()
-    )).final_output
+        + voice_plan.model_dump_json(),
+        Storyboard,
+    )
 
-    qa = (await Runner.run(
-        watcher,
-        "Audite este pacote de pré-produção:\nROTEIRO:\n"
+    qa = await run_agent(
+        WATCHER_SYSTEM,
+        "Audite o pacote de pré-produção:\nROTEIRO:\n"
         + draft.model_dump_json()
         + "\nVOZ:\n"
         + voice_plan.model_dump_json()
         + "\nSTORYBOARD:\n"
-        + board.model_dump_json()
-    )).final_output
+        + board.model_dump_json(),
+        WatcherReport,
+    )
 
     blocked = bool(qa.critical_failures) or qa.narrative_score < 90 or qa.factual_risk_score > 15
 
@@ -234,16 +230,19 @@ async def run_pipeline(brief: str):
     }
 
 st.title("🎬 Acima do Comum — AI Studio")
-st.caption("V0.4 • Radar → Story → Critic → Voice Director → Director → Watcher")
+st.caption("V0.5 • Gemini Free • Radar → Story → Critic → Voice Director → Director → Watcher")
 
 with st.sidebar:
+    st.markdown("### Motor")
+    st.success("Gemini API")
+    st.caption(MODEL)
     st.markdown("### ADC Quality Gate")
     st.write("Roteiro ≥ 85")
     st.write("Gancho ≥ 90")
     st.write("Credibilidade ≥ 95")
     st.write("Watcher sem falha crítica")
     st.divider()
-    st.caption("O sistema não envia mídia para renderização se a pré-produção falhar.")
+    st.caption("Nada segue para mídia se a pré-produção falhar.")
 
 brief = st.text_area(
     "O que vamos produzir?",
@@ -252,16 +251,22 @@ brief = st.text_area(
 )
 
 if st.button("Iniciar produção", type="primary", disabled=not brief.strip()):
-    if not os.getenv("OPENAI_API_KEY"):
-        st.error("OPENAI_API_KEY ainda não foi configurada no Render.")
+    if not API_KEY:
+        st.error("GEMINI_API_KEY ainda não foi configurada no Render.")
+        st.info("A conta gratuita da Gemini API pode ser usada; basta inserir a chave como variável secreta.")
         st.stop()
 
-    with st.status("ADC executando pipeline...", expanded=True) as status:
-        result = asyncio.run(run_pipeline(brief.strip()))
-        status.update(
-            label="Pipeline concluído" if not result["blocked"] else "Pipeline bloqueado pelo QA",
-            state="complete" if not result["blocked"] else "error",
-        )
+    try:
+        with st.status("ADC executando pipeline...", expanded=True) as status:
+            result = asyncio.run(run_pipeline(brief.strip()))
+            status.update(
+                label="Pipeline concluído" if not result["blocked"] else "Pipeline bloqueado pelo QA",
+                state="complete" if not result["blocked"] else "error",
+            )
+    except Exception as exc:
+        st.error("Falha ao executar o pipeline Gemini.")
+        st.code(str(exc))
+        st.stop()
 
     research = result["research"]
     script = result["script"]
@@ -278,33 +283,19 @@ if st.button("Iniciar produção", type="primary", disabled=not brief.strip()):
         c.metric(lab, val)
 
     tabs = st.tabs(["Roteiro", "Radar", "Voz", "Storyboard", "Watcher"])
-
     with tabs[0]:
         st.write(script.script)
         st.caption(f"Revisões automáticas: {result['revision_count']}")
-
     with tabs[1]:
         st.json(research.model_dump())
-
     with tabs[2]:
-        if result["voice"]:
-            st.json(result["voice"].model_dump())
-        else:
-            st.warning("Não liberado porque o roteiro não passou no Quality Gate.")
-
+        st.json(result["voice"].model_dump()) if result["voice"] else st.warning("Bloqueado pelo Quality Gate.")
     with tabs[3]:
-        if result["storyboard"]:
-            st.json(result["storyboard"].model_dump())
-        else:
-            st.warning("Storyboard não gerado porque o roteiro foi bloqueado.")
-
+        st.json(result["storyboard"].model_dump()) if result["storyboard"] else st.warning("Bloqueado pelo Quality Gate.")
     with tabs[4]:
-        if result["watcher"]:
-            st.json(result["watcher"].model_dump())
-        else:
-            st.warning("Watcher final não executado porque a etapa anterior foi bloqueada.")
+        st.json(result["watcher"].model_dump()) if result["watcher"] else st.warning("Watcher não executado.")
 
     if result["blocked"]:
-        st.error("⛔ ADC BLOQUEOU este projeto. Ele precisa de correção antes da geração de mídia.")
+        st.error("⛔ ADC BLOQUEOU este projeto. Corrija antes da geração de mídia.")
     else:
-        st.success("✅ Pré-produção aprovada. Pronto para a camada de voz, cenas e renderização.")
+        st.success("✅ Pré-produção aprovada. Pronto para voz, cenas e renderização.")
