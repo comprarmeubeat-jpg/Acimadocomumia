@@ -175,27 +175,24 @@ def media_qa(path, expected_duration):
     if not os.path.exists(path) or os.path.getsize(path)<10000:
         return {"ok":False,"issues":["Arquivo ausente ou vazio"]}
     try:
-        p=subprocess.run([ff,"-v","error","-i",path,"-f","null","-"],capture_output=True,text=True,timeout=120)
+        p=subprocess.run(
+            [ff,"-hide_banner","-i",path,"-af","silencedetect=noise=-45dB:d=2.5","-f","null","-"],
+            capture_output=True,text=True,timeout=90
+        )
+        txt=p.stderr or ""
         if p.returncode!=0:
-            report["ok"]=False; report["issues"].append("Falha de decodificação: "+p.stderr[-500:])
-    except Exception as e:
-        report["ok"]=False; report["issues"].append("Não foi possível decodificar o vídeo: "+str(e))
-    try:
-        p=subprocess.run([ff,"-hide_banner","-i",path,"-af","silencedetect=noise=-45dB:d=2.5","-f","null","-"],
-                         capture_output=True,text=True,timeout=120)
-        txt=p.stderr
+            report["ok"]=False
+            report["issues"].append("Falha de decodificação: "+txt[-500:])
         silences=len(re.findall(r"silence_start",txt))
         report["silence_events"]=silences
         if silences>=3:
-            report["ok"]=False; report["issues"].append("Silêncio excessivo detectado")
+            report["ok"]=False
+            report["issues"].append("Silêncio excessivo detectado")
     except Exception as e:
-        report["issues"].append("Aviso no teste de silêncio: "+str(e))
-    try:
-        size=os.path.getsize(path)
-        report["file_size_bytes"]=size
-        report["duration_ok"]=expected_duration>=5
-    except Exception:
-        pass
+        report["ok"]=False
+        report["issues"].append("Watcher não conseguiu validar o MP4: "+str(e))
+    report["file_size_bytes"]=os.path.getsize(path)
+    report["duration_ok"]=expected_duration>=5
     return report
 
 def render_free_media(result,workdir):
@@ -206,10 +203,14 @@ def render_free_media(result,workdir):
     asyncio.run(asyncio.wait_for(tts_to_file(script,audio), timeout=25))
     print("ADC_MEDIA_TTS_DONE", flush=True)
     duration=max(float(MP3(audio).info.length),5.0)
-    shots=result["storyboard"].shots or [Shot(index=1,narration_excerpt="",visual=result["script"].title,camera_motion="",duration_seconds=duration)]
+
+    shots=result["storyboard"].shots or [
+        Shot(index=1,narration_excerpt="",visual=result["script"].title,camera_motion="",duration_seconds=duration)
+    ]
     shots=shots[:8]
     print("ADC_MEDIA_IMAGES_START", flush=True)
     items=[None]*len(shots)
+
     def fetch_visual(i,shot):
         img=str(wd/f"img_{i:02}.jpg")
         q=safe_text(shot.visual,90)
@@ -221,38 +222,46 @@ def render_free_media(result,workdir):
             fallback_image(shot.visual,img)
             info={"title":"ADC fallback visual","license":"generated fallback","source":""}
         return i,img,info
+
     with ThreadPoolExecutor(max_workers=min(6,max(1,len(shots)))) as ex:
         futures=[ex.submit(fetch_visual,i,shot) for i,shot in enumerate(shots)]
         for fut in as_completed(futures):
             i,img,info=fut.result()
             items[i]=(img,info)
+
     imgs=[x[0] for x in items]
     sources=[x[1] for x in items]
     print("ADC_MEDIA_IMAGES_DONE", flush=True)
-    ff=imageio_ffmpeg.get_ffmpeg_exe()
-    print("ADC_MEDIA_FFMPEG_START", flush=True)
-    segdur=duration/len(imgs); segs=[]
-    for i,img in enumerate(imgs):
-        seg=str(wd/f"seg_{i:02}.mp4"); segs.append(seg)
-        cmd=[ff,"-y","-loop","1","-i",img,"-t",f"{segdur:.3f}","-r","30",
-             "-vf","scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,format=yuv420p",
-             "-c:v","libx264","-preset","ultrafast","-crf","25",seg]
-        subprocess.run(cmd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    concat=wd/"concat.txt"; concat.write_text("\n".join([f"file '{Path(x).name}'" for x in segs]),encoding="utf-8")
-    visuals=str(wd/"visuals.mp4")
-    subprocess.run([ff,"-y","-f","concat","-safe","0","-i",str(concat),"-c","copy",visuals],
-                   cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    srt=str(wd/"captions.srt"); make_srt(script,duration,srt)
+
+    segdur=duration/max(len(imgs),1)
+    concat=wd/"concat.txt"
+    concat_lines=[]
+    for img in imgs:
+        concat_lines.append(f"file '{Path(img).name}'")
+        concat_lines.append(f"duration {segdur:.3f}")
+    concat_lines.append(f"file '{Path(imgs[-1]).name}'")
+    concat.write_text("\n".join(concat_lines),encoding="utf-8")
+
+    srt=str(wd/"captions.srt")
+    make_srt(script,duration,srt)
     out=str(wd/"adc_final.mp4")
-    vf="subtitles=captions.srt:force_style='FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=90'"
-    cmd=[ff,"-y","-i","visuals.mp4","-i","voice.mp3","-vf",vf,"-c:v","libx264","-preset","ultrafast","-crf","25",
+    ff=imageio_ffmpeg.get_ffmpeg_exe()
+    base_filter="scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=24,format=yuv420p"
+    subtitle_filter=base_filter+",subtitles=captions.srt:force_style='FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=90'"
+
+    print("ADC_MEDIA_FFMPEG_START", flush=True)
+    cmd=[ff,"-y","-f","concat","-safe","0","-i","concat.txt","-i","voice.mp3",
+         "-vf",subtitle_filter,"-c:v","libx264","-preset","ultrafast","-crf","25",
          "-c:a","aac","-b:a","128k","-shortest","adc_final.mp4"]
     try:
-        subprocess.run(cmd,cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        subprocess.run(cmd,cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
     except Exception:
-        subprocess.run([ff,"-y","-i","visuals.mp4","-i","voice.mp3","-c:v","copy","-c:a","aac","-shortest","adc_final.mp4"],
-                       cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        fallback=[ff,"-y","-f","concat","-safe","0","-i","concat.txt","-i","voice.mp3",
+                  "-vf",base_filter,"-c:v","libx264","-preset","ultrafast","-crf","25",
+                  "-c:a","aac","-b:a","128k","-shortest","adc_final.mp4"]
+        subprocess.run(fallback,cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
     print("ADC_MEDIA_FFMPEG_DONE", flush=True)
+
     print("ADC_MEDIA_QA_START", flush=True)
     qa=media_qa(out,duration)
     print("ADC_MEDIA_QA_DONE", flush=True)
