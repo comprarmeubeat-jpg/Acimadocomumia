@@ -15,7 +15,7 @@ app = FastAPI(title="Acima do Comum AI Studio")
 PASSWORD = os.getenv("ADC_PANEL_PASSWORD","").strip()
 API_KEY = os.getenv("GEMINI_API_KEY","").strip()
 MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-2.5-flash-lite")
-FALLBACK_MODELS = [MODEL,"gemini-2.5-flash-lite","gemini-2.5-flash"]
+FALLBACK_MODELS = [MODEL]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
@@ -76,7 +76,13 @@ def ask_structured(system_instruction,prompt,schema):
     raise RuntimeError(f"Gemini indisponível: {last}")
 
 async def run_agent(sys,prompt,schema):
-    return await asyncio.to_thread(ask_structured,sys,prompt,schema)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(ask_structured,sys,prompt,schema),
+            timeout=22
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError("Gemini excedeu 22 segundos sem responder")
 
 def gate_passes(c):
     return c.average>=85 and c.hook>=90 and c.credibility>=95 and not c.critical_issues
