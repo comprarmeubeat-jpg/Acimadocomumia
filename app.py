@@ -201,11 +201,14 @@ def render_free_media(result,workdir):
     wd=Path(workdir); wd.mkdir(parents=True,exist_ok=True)
     script=result["script"].script
     audio=str(wd/"voice.mp3")
-    asyncio.run(tts_to_file(script,audio))
+    print("ADC_MEDIA_TTS_START", flush=True)
+    asyncio.run(asyncio.wait_for(tts_to_file(script,audio), timeout=25))
+    print("ADC_MEDIA_TTS_DONE", flush=True)
     duration=max(float(MP3(audio).info.length),5.0)
     shots=result["storyboard"].shots or [Shot(index=1,narration_excerpt="",visual=result["script"].title,camera_motion="",duration_seconds=duration)]
     shots=shots[:10]
     sources=[]; imgs=[]
+    print("ADC_MEDIA_IMAGES_START", flush=True)
     for i,shot in enumerate(shots):
         img=str(wd/f"img_{i:02}.jpg")
         q=safe_text(shot.visual,100)
@@ -214,7 +217,9 @@ def render_free_media(result,workdir):
         if not info:
             fallback_image(shot.visual,img); info={"title":"ADC fallback visual","license":"generated fallback","source":""}
         imgs.append(img); sources.append(info)
+    print("ADC_MEDIA_IMAGES_DONE", flush=True)
     ff=imageio_ffmpeg.get_ffmpeg_exe()
+    print("ADC_MEDIA_FFMPEG_START", flush=True)
     segdur=duration/len(imgs); segs=[]
     for i,img in enumerate(imgs):
         seg=str(wd/f"seg_{i:02}.mp4"); segs.append(seg)
@@ -236,7 +241,10 @@ def render_free_media(result,workdir):
     except Exception:
         subprocess.run([ff,"-y","-i","visuals.mp4","-i","voice.mp3","-c:v","copy","-c:a","aac","-shortest","adc_final.mp4"],
                        cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    print("ADC_MEDIA_FFMPEG_DONE", flush=True)
+    print("ADC_MEDIA_QA_START", flush=True)
     qa=media_qa(out,duration)
+    print("ADC_MEDIA_QA_DONE", flush=True)
     return out,sources,duration,qa
 
 async def planning_task(job_id,brief):
