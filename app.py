@@ -81,7 +81,7 @@ async def run_agent(sys,prompt,schema):
                         system_instruction=sys,
                         response_mime_type="application/json",
                         response_schema=schema,
-                        temperature=0.5
+                        thinking_config=types.ThinkingConfig(thinking_level="minimal")
                     )
                 ),
                 timeout=25
