@@ -357,6 +357,7 @@ async def selftest_runner(tid):
         report["media"]={"ok":False,"error":str(e)}
     report["ok"]=bool(report["brain"].get("ok")) and bool(report["media"].get("ok"))
     SELFTESTS[tid]={"status":"complete","report":report}
+    print("ADC_SELFTEST_RESULT="+json.dumps(report,ensure_ascii=False), flush=True)
 
 @app.get("/_selftest/start/{token}")
 async def selftest_start(token:str):
