@@ -206,7 +206,8 @@ def render_free_media(result,workdir):
     except Exception:
         subprocess.run([ff,"-y","-i","visuals.mp4","-i","voice.mp3","-c:v","copy","-c:a","aac","-shortest","adc_final.mp4"],
                        cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    qa=media_qa(out,duration)\n    return out,sources,duration,qa
+    qa=media_qa(out,duration)
+    return out,sources,duration,qa
 
 async def planning_task(job_id,brief):
     try:
