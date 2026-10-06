@@ -14,13 +14,8 @@ app = FastAPI(title="Acima do Comum AI Studio")
 
 PASSWORD = os.getenv("ADC_PANEL_PASSWORD", "").strip()
 API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-MODEL = os.getenv("ADC_GEMINI_MODEL", "gemini-flash-latest")
-FALLBACK_MODELS = [
-    MODEL,
-    "gemini-3.8-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-2.5-flash-lite",
-]
+MODEL = os.getenv("ADC_GEMINI_MODEL", "gemini-2.5-flash-lite")
+FALLBACK_MODELS = [MODEL, "gemini-2.5-flash-lite", "gemini-2.5-flash"]
 
 def auth_token():
     return hashlib.sha256(("adc:" + PASSWORD).encode()).hexdigest()
@@ -87,6 +82,16 @@ class WatcherReport(BaseModel):
     qa_checklist: list[str] = []
     corrections: list[str] = []
 
+class DraftPackage(BaseModel):
+    research: ResearchPlan
+    script: ScriptDraft
+    voice: VoicePlan
+    storyboard: Storyboard
+
+class ReviewPackage(BaseModel):
+    critic: CriticScore
+    watcher: WatcherReport
+
 RADAR_SYSTEM = """Você é ADC Radar, pesquisador-chefe do Acima do Comum.
 Transforme o brief em plano editorial verificável. Nunca invente dados.
 Liste fatos que precisam ser confirmados, fontes ideais, riscos, ângulo e estrutura de retenção.
@@ -126,36 +131,31 @@ def ask_structured(system_instruction: str, prompt: str, schema):
     if not API_KEY:
         raise RuntimeError("GEMINI_API_KEY ausente")
     last_error = None
-    seen = set()
-    for model_name in FALLBACK_MODELS:
-        if not model_name or model_name in seen:
-            continue
-        seen.add(model_name)
-        for attempt in range(2):
-            try:
-                client = genai.Client(api_key=API_KEY)
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                        temperature=0.6,
-                    ),
-                )
-                if response.parsed is not None:
-                    return response.parsed
-                return schema.model_validate_json(response.text)
-            except Exception as exc:
-                last_error = exc
-                msg = str(exc)
-                retriable = "503" in msg or "UNAVAILABLE" in msg or "429" in msg or "RESOURCE_EXHAUSTED" in msg
-                if not retriable:
-                    break
-                import time
-                time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"Gemini indisponível após tentativas e fallbacks: {last_error}")
+    for model_name in dict.fromkeys(FALLBACK_MODELS):
+        try:
+            client = genai.Client(
+                api_key=API_KEY,
+                http_options=types.HttpOptions(api_version="v1", timeout=15000),
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.5,
+                ),
+            )
+            if response.parsed is not None:
+                return response.parsed
+            return schema.model_validate_json(response.text)
+        except Exception as exc:
+            last_error = exc
+            msg = str(exc)
+            if not any(x in msg for x in ["503","UNAVAILABLE","429","RESOURCE_EXHAUSTED","timeout","Timeout"]):
+                continue
+    raise RuntimeError(f"Gemini não respondeu dentro do limite. Último erro: {last_error}")
 
 async def run_agent(system_instruction: str, prompt: str, schema):
     return await asyncio.to_thread(ask_structured, system_instruction, prompt, schema)
@@ -164,27 +164,39 @@ def gate_passes(score: CriticScore) -> bool:
     return score.average >= 85 and score.hook >= 90 and score.credibility >= 95 and not score.critical_issues
 
 async def run_pipeline(brief: str):
-    research = await run_agent(RADAR_SYSTEM, f"BRIEF:\n{brief}", ResearchPlan)
-    draft = await run_agent(STORY_SYSTEM, "BRIEF:\n"+brief+"\nPLANO:\n"+research.model_dump_json(), ScriptDraft)
-    review = await run_agent(CRITIC_SYSTEM, "Avalie rigorosamente:\n"+draft.model_dump_json(), CriticScore)
-    revision_count = 0
-    while not gate_passes(review) and revision_count < 2:
-        revision_count += 1
-        draft = await run_agent(
-            STORY_SYSTEM,
-            "Reescreva corrigindo esta crítica:\n"+review.model_dump_json()
-            +"\nROTEIRO:\n"+draft.model_dump_json()
-            +"\nPLANO:\n"+research.model_dump_json(),
-            ScriptDraft,
-        )
-        review = await run_agent(CRITIC_SYSTEM, "Reavalie do zero:\n"+draft.model_dump_json(), CriticScore)
-    if not gate_passes(review):
-        return {"research":research,"script":draft,"critic":review,"revision_count":revision_count,"blocked":True,"voice":None,"storyboard":None,"watcher":None}
-    voice = await run_agent(VOICE_SYSTEM, "ROTEIRO:\n"+draft.model_dump_json(), VoicePlan)
-    board = await run_agent(DIRECTOR_SYSTEM, "ROTEIRO:\n"+draft.model_dump_json()+"\nVOZ:\n"+voice.model_dump_json(), Storyboard)
-    watcher = await run_agent(WATCHER_SYSTEM, "ROTEIRO:\n"+draft.model_dump_json()+"\nVOZ:\n"+voice.model_dump_json()+"\nSTORYBOARD:\n"+board.model_dump_json(), WatcherReport)
-    blocked = bool(watcher.critical_failures) or watcher.narrative_score < 90 or watcher.factual_risk_score > 15
-    return {"research":research,"script":draft,"critic":review,"revision_count":revision_count,"blocked":blocked,"voice":voice,"storyboard":board,"watcher":watcher}
+    # Free-tier fast path: producer pass + independent QA pass.
+    producer_system = RADAR_SYSTEM + "\n\n" + STORY_SYSTEM + "\n\n" + VOICE_SYSTEM + "\n\n" + DIRECTOR_SYSTEM
+    draft = await run_agent(
+        producer_system,
+        "Execute em sequência Radar, Story, Voice Director e Director para este brief. "
+        "Entregue o pacote completo, sem inventar fatos. BRIEF:\n" + brief,
+        DraftPackage,
+    )
+    qa_system = CRITIC_SYSTEM + "\n\n" + WATCHER_SYSTEM
+    review = await run_agent(
+        qa_system,
+        "Você NÃO participou da criação. Audite com rigor e tente reprovar falhas reais.\n"
+        "PACOTE:\n" + draft.model_dump_json(),
+        ReviewPackage,
+    )
+    critic = review.critic
+    watcher = review.watcher
+    blocked = (
+        not gate_passes(critic)
+        or bool(watcher.critical_failures)
+        or watcher.narrative_score < 90
+        or watcher.factual_risk_score > 15
+    )
+    return {
+        "research": draft.research,
+        "script": draft.script,
+        "critic": critic,
+        "revision_count": 0,
+        "blocked": blocked,
+        "voice": draft.voice,
+        "storyboard": draft.storyboard,
+        "watcher": watcher,
+    }
 
 CSS = """
 body{font-family:Arial,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:24px}
@@ -211,7 +223,7 @@ async def home(request: Request):
         <button type="submit">Entrar</button></form></div>""")
     status = '<span class="ok">Gemini configurado</span>' if API_KEY else '<span class="bad">GEMINI_API_KEY ausente</span>'
     return page(f"""<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1>
-    <p class="muted">V0.6 • Radar → Story → Critic → Voice Director → Director → Watcher</p>
+    <p class="muted">V0.7 • Free Fast • Radar → Story → Voice → Director → Critic → Watcher</p>
     <p>{status}</p></div>
     <div class="card"><form method="post" action="/produce">
     <label>O que vamos produzir?</label><br><br>
