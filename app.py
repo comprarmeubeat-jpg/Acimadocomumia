@@ -1,6 +1,7 @@
 import os, hmac, hashlib, html, json, asyncio, uuid, tempfile, shutil, subprocess, re
 from pathlib import Path
 import requests
+import httpx
 import edge_tts
 import imageio_ffmpeg
 from mutagen.mp3 import MP3
@@ -15,7 +16,7 @@ app = FastAPI(title="Acima do Comum AI Studio")
 PASSWORD = os.getenv("ADC_PANEL_PASSWORD","").strip()
 API_KEY = os.getenv("GEMINI_API_KEY","").strip()
 MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-3.5-flash-lite")
-FALLBACK_MODELS = [MODEL,"gemini-3.7-flash","gemini-3.5-flash"]
+FALLBACK_MODELS = [MODEL]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
@@ -66,32 +67,43 @@ WATCHER_SYSTEM="""Você é ADC Watcher independente. Procure falhas críticas de
 async def run_agent(sys,prompt,schema):
     if not API_KEY:
         raise RuntimeError("GEMINI_API_KEY ausente")
-    last=None
-    for model_name in dict.fromkeys(FALLBACK_MODELS):
-        try:
-            client=genai.Client(
-                api_key=API_KEY,
-                http_options=types.HttpOptions(api_version="v1")
+    url="https://generativelanguage.googleapis.com/v1beta/interactions"
+    payload={
+        "model": MODEL,
+        "system_instruction": sys,
+        "input": prompt,
+        "response_format": {
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": schema.model_json_schema(),
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(22.0, connect=8.0)) as client:
+            r=await client.post(
+                url,
+                headers={"x-goog-api-key":API_KEY,"Content-Type":"application/json"},
+                json=payload,
             )
-            r=await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys,
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                        thinking_config=types.ThinkingConfig(thinking_level="minimal")
-                    )
-                ),
-                timeout=25
-            )
-            return r.parsed if r.parsed is not None else schema.model_validate_json(r.text)
-        except asyncio.TimeoutError:
-            last=RuntimeError(f"{model_name} excedeu 25 segundos")
-        except Exception as exc:
-            last=exc
-    raise RuntimeError(f"Gemini indisponível após fallbacks: {last}")
+        if r.status_code >= 400:
+            raise RuntimeError(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
+        data=r.json()
+        if data.get("status") not in (None,"completed"):
+            raise RuntimeError(f"Gemini status {data.get('status')}: {json.dumps(data,ensure_ascii=False)[:500]}")
+        texts=[]
+        for step in data.get("steps",[]):
+            if step.get("type")=="model_output":
+                for part in step.get("content",[]):
+                    if part.get("type")=="text" and part.get("text"):
+                        texts.append(part["text"])
+        raw="".join(texts).strip()
+        if not raw:
+            raise RuntimeError("Gemini retornou resposta vazia")
+        return schema.model_validate_json(raw)
+    except httpx.TimeoutException:
+        raise RuntimeError("Gemini excedeu 22 segundos")
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Falha de rede Gemini: {exc}")
 
 def gate_passes(c):
     return c.average>=85 and c.hook>=90 and c.credibility>=95 and not c.critical_issues
