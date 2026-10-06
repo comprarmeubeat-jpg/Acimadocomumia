@@ -138,6 +138,35 @@ def make_srt(text,duration,path):
         lines += [str(i+1),f"{srt_time(a)} --> {srt_time(b)}",p,""]
     Path(path).write_text("\n".join(lines),encoding="utf-8")
 
+def media_qa(path, expected_duration):
+    ff=imageio_ffmpeg.get_ffmpeg_exe()
+    report={"ok":True,"issues":[],"duration_expected":expected_duration}
+    if not os.path.exists(path) or os.path.getsize(path)<10000:
+        return {"ok":False,"issues":["Arquivo ausente ou vazio"]}
+    try:
+        p=subprocess.run([ff,"-v","error","-i",path,"-f","null","-"],capture_output=True,text=True,timeout=120)
+        if p.returncode!=0:
+            report["ok"]=False; report["issues"].append("Falha de decodificação: "+p.stderr[-500:])
+    except Exception as e:
+        report["ok"]=False; report["issues"].append("Não foi possível decodificar o vídeo: "+str(e))
+    try:
+        p=subprocess.run([ff,"-hide_banner","-i",path,"-af","silencedetect=noise=-45dB:d=2.5","-f","null","-"],
+                         capture_output=True,text=True,timeout=120)
+        txt=p.stderr
+        silences=len(re.findall(r"silence_start",txt))
+        report["silence_events"]=silences
+        if silences>=3:
+            report["ok"]=False; report["issues"].append("Silêncio excessivo detectado")
+    except Exception as e:
+        report["issues"].append("Aviso no teste de silêncio: "+str(e))
+    try:
+        size=os.path.getsize(path)
+        report["file_size_bytes"]=size
+        report["duration_ok"]=expected_duration>=5
+    except Exception:
+        pass
+    return report
+
 def render_free_media(result,workdir):
     wd=Path(workdir); wd.mkdir(parents=True,exist_ok=True)
     script=result["script"].script
@@ -177,7 +206,7 @@ def render_free_media(result,workdir):
     except Exception:
         subprocess.run([ff,"-y","-i","visuals.mp4","-i","voice.mp3","-c:v","copy","-c:a","aac","-shortest","adc_final.mp4"],
                        cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    return out,sources,duration
+    qa=media_qa(out,duration)\n    return out,sources,duration,qa
 
 async def planning_task(job_id,brief):
     try:
@@ -214,7 +243,7 @@ async def home(request:Request):
     if not is_auth(request):
         return page('<div class="card"><h1>🔒 Acima do Comum</h1><form method="post" action="/login"><input type="password" name="password" placeholder="Senha" required><br><br><button>Entrar</button></form></div>')
     status='<span class="ok">Gemini configurado</span>' if API_KEY else '<span class="bad">Gemini ausente</span>'
-    return page(f'<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1><p class="muted">V0.8 • Free Media • Brain + QA + TTS + Commons + MP4</p><p>{status}</p></div>'
+    return page(f'<div class="card"><h1>🎬 Acima do Comum — AI Studio</h1><p class="muted">V0.9 • Free Media • Brain + QA + TTS + Commons + MP4 + Media Watcher</p><p>{status}</p></div>'
                 '<div class="card"><form method="post" action="/produce"><label>O que vamos produzir?</label><br><br>'
                 '<textarea name="brief" rows="7" required placeholder="Ex.: vídeo vertical de 60 segundos sobre um mistério histórico brasileiro."></textarea><br><br>'
                 '<button>Iniciar produção</button></form></div>')
@@ -241,8 +270,10 @@ async def job(request:Request,jid:str):
     if st in ("planning","rendering"):
         label="Planejando e auditando..." if st=="planning" else "Gerando voz, buscando imagens e montando MP4..."
         return page(f'<div class="card"><h2>{label}</h2><p class="muted">Pode deixar esta tela aberta; ela atualiza sozinha.</p></div>',3)
-    if st in ("failed","render_failed"):
-        return page(f'<div class="card"><h2 class="bad">Falha</h2><pre>{html.escape(j.get("error",""))}</pre><a class="btn" href="/">Novo projeto</a></div>')
+    if st in ("failed","render_failed","media_blocked"):
+        msg=j.get("error","")
+        if st=="media_blocked": msg="Watcher técnico bloqueou o MP4: "+json.dumps(j.get("qa",{}),ensure_ascii=False)
+        return page(f'<div class="card"><h2 class="bad">Falha / bloqueio</h2><pre>{html.escape(msg)}</pre><a class="btn" href="/">Novo projeto</a></div>')
     r=j["result"]; s=r["script"]; c=r["critic"]
     metrics="".join(f'<div class="metric"><b>{k}</b><br>{v}</div>' for k,v in [
         ("Gancho",c.hook),("Retenção",c.retention),("Narrativa",c.narrative),("Clareza",c.clarity),("Credibilidade",c.credibility),("ADC Score",c.average)])
@@ -279,4 +310,4 @@ async def media(request:Request,jid:str):
 
 @app.get("/health")
 async def health():
-    return {"ok":True,"version":"0.8","gemini":bool(API_KEY),"free_media":True}
+    return {"ok":True,"version":"0.9","gemini":bool(API_KEY),"free_media":True,"media_watcher":True}
