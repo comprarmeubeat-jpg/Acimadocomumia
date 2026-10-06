@@ -9,15 +9,12 @@ from mutagen.mp3 import MP3
 from PIL import Image, ImageDraw
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
-from google import genai
-from google.genai import types
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Acima do Comum AI Studio")
 PASSWORD = os.getenv("ADC_PANEL_PASSWORD","").strip()
 API_KEY = os.getenv("GEMINI_API_KEY","").strip()
 MODEL = os.getenv("ADC_GEMINI_MODEL","gemini-3.5-flash-lite")
-FALLBACK_MODELS = [MODEL]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
@@ -207,7 +204,7 @@ def render_free_media(result,workdir):
     shots=result["storyboard"].shots or [
         Shot(index=1,narration_excerpt="",visual=result["script"].title,camera_motion="",duration_seconds=duration)
     ]
-    shots=shots[:8]
+    shots=shots[:5]
     print("ADC_MEDIA_IMAGES_START", flush=True)
     items=[None]*len(shots)
 
@@ -246,12 +243,12 @@ def render_free_media(result,workdir):
     make_srt(script,duration,srt)
     out=str(wd/"adc_final.mp4")
     ff=imageio_ffmpeg.get_ffmpeg_exe()
-    base_filter="scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=24,format=yuv420p"
+    base_filter="scale=540:960:force_original_aspect_ratio=increase,crop=540:960,fps=20,format=yuv420p"
     subtitle_filter=base_filter+",subtitles=captions.srt:force_style='FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=90'"
 
     print("ADC_MEDIA_FFMPEG_START", flush=True)
     cmd=[ff,"-y","-f","concat","-safe","0","-i","concat.txt","-i","voice.mp3",
-         "-vf",subtitle_filter,"-c:v","libx264","-preset","ultrafast","-crf","25",
+         "-vf",subtitle_filter,"-c:v","libx264","-preset","ultrafast","-crf","26","-threads","1",
          "-c:a","aac","-b:a","128k","-shortest","adc_final.mp4"]
     try:
         subprocess.run(cmd,cwd=wd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
