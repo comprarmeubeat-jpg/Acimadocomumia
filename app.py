@@ -19,7 +19,7 @@ FALLBACK_MODELS = [MODEL,"gemini-2.5-flash-lite","gemini-2.5-flash"]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
-SELFTESTS = {}
+SELFTESTS = {}\nSELFTEST_AUTO = os.getenv("ADC_SELFTEST_AUTO","0") == "1"
 
 def auth_token():
     return hashlib.sha256(("adc:"+PASSWORD).encode()).hexdigest()
