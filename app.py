@@ -353,8 +353,11 @@ async def _adc_smoke_test():
                "por que o céu muda de cor no pôr do sol. Use linguagem simples, fatos seguros, "
                "abertura forte e nenhuma afirmação sensacionalista.")
         result=await run_pipeline(brief)
+        print("ADC_SMOKE_AI_DONE", flush=True)
         wd=tempfile.mkdtemp(prefix="adc_smoke_")
+        print("ADC_SMOKE_MEDIA_START", flush=True)
         out,sources,duration,qa=await asyncio.to_thread(render_free_media,result,wd)
+        print("ADC_SMOKE_MEDIA_DONE", flush=True)
         summary={
             "pipeline_blocked": bool(result.get("blocked")),
             "critic_score": result["critic"].average,
