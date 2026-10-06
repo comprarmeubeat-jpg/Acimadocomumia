@@ -19,6 +19,7 @@ FALLBACK_MODELS = [MODEL,"gemini-3.5-flash-lite","gemini-3.7-flash"]
 VOICE = os.getenv("ADC_TTS_VOICE","pt-BR-AntonioNeural")
 SELFTEST_TOKEN = os.getenv("ADC_SELFTEST_TOKEN","").strip()
 JOBS = {}
+SMOKE_TEST_ON_START = os.getenv("ADC_SMOKE_TEST_ON_START","").lower() == "true"
 SELFTESTS = {}
 SELFTEST_AUTO = os.getenv("ADC_SELFTEST_AUTO","0") == "1"
 
@@ -342,3 +343,37 @@ async def media(request:Request,jid:str):
 @app.get("/health")
 async def health():
     return {"ok":True,"version":"1.0-free","gemini":bool(API_KEY),"free_media":True,"media_watcher":True}
+
+
+async def _adc_smoke_test():
+    print("ADC_SMOKE_START", flush=True)
+    wd=None
+    try:
+        brief=("Crie um vídeo vertical educativo de aproximadamente 30 segundos explicando "
+               "por que o céu muda de cor no pôr do sol. Use linguagem simples, fatos seguros, "
+               "abertura forte e nenhuma afirmação sensacionalista.")
+        result=await run_pipeline(brief)
+        wd=tempfile.mkdtemp(prefix="adc_smoke_")
+        out,sources,duration,qa=await asyncio.to_thread(render_free_media,result,wd)
+        summary={
+            "pipeline_blocked": bool(result.get("blocked")),
+            "critic_score": result["critic"].average,
+            "watcher_critical": result["watcher"].critical_failures,
+            "mp4_exists": os.path.exists(out),
+            "mp4_size": os.path.getsize(out) if os.path.exists(out) else 0,
+            "duration": duration,
+            "image_count": len(sources),
+            "media_qa": qa,
+        }
+        print("ADC_SMOKE_RESULT "+json.dumps(summary,ensure_ascii=False), flush=True)
+    except Exception as e:
+        print("ADC_SMOKE_ERROR "+repr(e), flush=True)
+    finally:
+        if wd:
+            shutil.rmtree(wd,ignore_errors=True)
+        print("ADC_SMOKE_END", flush=True)
+
+@app.on_event("startup")
+async def _run_smoke_test_once():
+    if SMOKE_TEST_ON_START:
+        asyncio.create_task(_adc_smoke_test())
