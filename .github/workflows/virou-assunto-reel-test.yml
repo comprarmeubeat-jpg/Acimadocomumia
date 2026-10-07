@@ -1,0 +1,97 @@
+name: Virou Assunto Reel Render
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - virou-assunto-engine
+    paths:
+      - "virou-assunto-engine/package.json"
+      - "virou-assunto-engine/render-requirements.txt"
+      - "virou-assunto-engine/generate_voiceover.py"
+      - "virou-assunto-engine/src/**"
+      - ".github/workflows/virou-assunto-reel-test.yml"
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: virou-assunto-engine/render-requirements.txt
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: virou-assunto-engine/package.json
+
+      - name: Cache Kokoro model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: va-kokoro-ptbr-v1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y espeak-ng ffmpeg libsndfile1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r virou-assunto-engine/render-requirements.txt
+
+      - name: Install renderer
+        working-directory: virou-assunto-engine
+        run: npm install --no-audit --no-fund
+
+      - name: Generate voiceover and timings
+        working-directory: virou-assunto-engine
+        run: python generate_voiceover.py
+
+      - name: Master voiceover
+        working-directory: virou-assunto-engine
+        run: |
+          ffmpeg -y -i public/voiceover.wav \
+            -af "highpass=f=65,acompressor=threshold=-20dB:ratio=1.8:attack=8:release=120,loudnorm=I=-16:TP=-1.5:LRA=9" \
+            public/voiceover.master.wav
+          mv public/voiceover.master.wav public/voiceover.wav
+
+      - name: Ensure Remotion browser
+        working-directory: virou-assunto-engine
+        run: npx remotion browser ensure
+
+      - name: Render vertical reel
+        working-directory: virou-assunto-engine
+        run: |
+          mkdir -p out
+          npm run render
+
+      - name: Technical QA
+        working-directory: virou-assunto-engine
+        run: |
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,codec_type,width,height,r_frame_rate,sample_rate,channels -of json out/reel.mp4 > out/qa.json
+          cat out/qa.json
+          ffmpeg -hide_banner -i out/reel.mp4 -af "silencedetect=noise=-45dB:d=0.7" -f null - 2> out/audio-check.txt || true
+          cat out/audio-check.txt
+
+      - name: Upload reel
+        uses: actions/upload-artifact@v4
+        with:
+          name: virou-assunto-bets-v02
+          path: |
+            virou-assunto-engine/out/reel.mp4
+            virou-assunto-engine/out/qa.json
+            virou-assunto-engine/out/audio-check.txt
+          if-no-files-found: error
+          retention-days: 3
