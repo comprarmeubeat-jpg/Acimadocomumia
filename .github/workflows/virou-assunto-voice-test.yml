@@ -6,7 +6,8 @@ on:
     branches:
       - virou-assunto-engine
     paths:
-      - "virou-assunto-engine/**"
+      - "virou-assunto-engine/voice_test.py"
+      - "virou-assunto-engine/requirements.txt"
       - ".github/workflows/virou-assunto-voice-test.yml"
 
 jobs:
