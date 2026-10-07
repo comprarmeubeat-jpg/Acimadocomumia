@@ -1,0 +1,14 @@
+{
+  "name": "virou-assunto-reel-engine",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "render": "remotion render src/index.ts VirouAssunto out/reel.mp4 --codec h264 --crf 18 --audio-codec aac --pixel-format yuv420p"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.533",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.533"
+  }
+}
