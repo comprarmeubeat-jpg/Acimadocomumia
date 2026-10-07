@@ -1,0 +1,64 @@
+name: Virou Assunto Voice Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - virou-assunto-engine
+    paths:
+      - "virou-assunto-engine/**"
+      - ".github/workflows/virou-assunto-voice-test.yml"
+
+jobs:
+  voice-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: virou-assunto-engine/requirements.txt
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: va-kokoro-ptbr-v1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y espeak-ng ffmpeg libsndfile1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r virou-assunto-engine/requirements.txt
+
+      - name: Generate PT-BR voice samples
+        run: |
+          python virou-assunto-engine/voice_test.py
+
+      - name: Master preview audio
+        run: |
+          mkdir -p voice_test_output/mastered
+          for f in voice_test_output/*.wav; do
+            name="$(basename "$f" .wav)"
+            ffmpeg -y -i "$f" \
+              -af "highpass=f=70,acompressor=threshold=-18dB:ratio=2.4:attack=10:release=110,loudnorm=I=-16:TP=-1.5:LRA=7" \
+              -c:a libmp3lame -b:a 192k "voice_test_output/mastered/${name}.mp3"
+          done
+
+      - name: Upload voice benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: virou-assunto-ptbr-voice-benchmark
+          path: voice_test_output/
+          if-no-files-found: error
+          retention-days: 3
